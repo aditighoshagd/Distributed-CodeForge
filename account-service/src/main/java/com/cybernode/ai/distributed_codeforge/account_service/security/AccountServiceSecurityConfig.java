@@ -1,6 +1,7 @@
 package com.cybernode.ai.distributed_codeforge.account_service.security;
 
 import com.cybernode.ai.distributed_codeforge.common_lib.security.JwtAuthFilter;
+import jakarta.servlet.DispatcherType;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -33,7 +34,7 @@ public class AccountServiceSecurityConfig {
                     .cors(Customizer.withDefaults())
                     .sessionManagement(sessionConfig -> sessionConfig.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                     .authorizeHttpRequests(auth -> auth
-                            .requestMatchers("/api/auth/**","/webhooks/**"
+                            .requestMatchers("/auth/**","/webhooks/**"
                             ).permitAll()
                             .anyRequest().authenticated()
                     )
