@@ -1,0 +1,39 @@
+# IntelliJ
+.idea/
+*.iml
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
+
+# Build
+target/
+build/
+out/
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.*
+*.env
+
+# Spring Boot configs
+**/src/main/resources/application.yml
+**/src/main/resources/application.yaml
+**/src/main/resources/application.properties
+
+# Secrets
+*.pem
+*.key
+*.jks
+*.keystore
+*.p12
+
+# Maven
+.mvn/wrapper/maven-wrapper.jar
+
+Thumbs.db
