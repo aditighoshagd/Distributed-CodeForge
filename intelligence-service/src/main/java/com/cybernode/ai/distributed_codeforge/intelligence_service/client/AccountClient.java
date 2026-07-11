@@ -1,4 +1,5 @@
-package com.cybernode.ai.distributed_codeforge.workspace_service.client;
+package com.cybernode.ai.distributed_codeforge.intelligence_service.client;
+
 
 import com.cybernode.ai.distributed_codeforge.common_lib.dto.PlanDto;
 import com.cybernode.ai.distributed_codeforge.common_lib.dto.UserDto;
@@ -8,7 +9,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 
 import java.util.Optional;
 
-@FeignClient(name = "account-service", path = "/account", url="${ACCOUNT_SERVICE_URI:}")
+@FeignClient(name = "account-service", path = "/account",url="${ACCOUNT_SERVICE_URI:}")
 public interface AccountClient {
 
     @GetMapping("/internal/v1/users/by-email")

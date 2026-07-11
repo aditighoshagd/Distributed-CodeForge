@@ -33,6 +33,9 @@ out/
 *.keystore
 *.p12
 
+#k8s
+k8s/
+
 # Maven
 .mvn/wrapper/maven-wrapper.jar
 
