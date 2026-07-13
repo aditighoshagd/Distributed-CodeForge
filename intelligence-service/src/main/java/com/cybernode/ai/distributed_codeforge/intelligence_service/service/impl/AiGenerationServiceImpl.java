@@ -24,18 +24,25 @@ import com.cybernode.ai.distributed_codeforge.intelligence_service.service.Usage
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.metadata.Usage;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.content.Media;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
+import org.springframework.util.MimeTypeUtils;
+import org.springframework.web.multipart.MultipartFile;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
 
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
@@ -54,18 +61,83 @@ public class AiGenerationServiceImpl implements AiGenerationService {
     private final WorkspaceClient workspaceClient;
     private final UsageService usageService;
     private final KafkaTemplate<String,Object> kafkaTemplate;
+    private final VectorStore vectorStore;
+
 
 
     private static final Pattern FILE_TAG_PATTERN =
             Pattern.compile("<file path=\"([^\"]+)\">(.*?)</file>", Pattern.DOTALL);
     @Override
     @PreAuthorize("@security.canEditProject(#projectId)")
-    public Flux<StreamResponse> streamResponse(String userMessage, Long projectId) {
-//        usageService.checkDailyTokensUsage();
+    public Flux<StreamResponse> streamResponse(String userMessage, Long projectId, MultipartFile image) {
+        usageService.checkDailyTokensUsage();
         Long userId= authUtil.getCurrentUserId();
+
+        final String effectiveUserMessage;
+        if ((userMessage == null || userMessage.trim().isEmpty()) && image != null && !image.isEmpty()) {
+            effectiveUserMessage = "Build a matching React component or page that replicates the layout, styling, and design elements shown in this image.";
+        } else {
+            effectiveUserMessage = userMessage;
+        }
 
         SecurityContext securityContext = SecurityContextHolder.getContext();
         ChatSession chatSession=createChatSessionIfNotExists(projectId,userId);
+
+        // Upload image synchronously to get final URL
+        String uploadedImageUrl = null;
+        if (image != null && !image.isEmpty()) {
+            try {
+                String fileName = workspaceClient.uploadChatAttachment(projectId, image);
+                uploadedImageUrl = "/api/v1/workspace/projects/" + projectId + "/files/attachments/" + fileName;
+                log.info("Saved user uploaded image. Relative URL: {}", uploadedImageUrl);
+            } catch (Exception e) {
+                log.error("Failed to upload user image to MinIO via workspace-service", e);
+            }
+        }
+        final String finalImageUrl = uploadedImageUrl;
+
+        // Load the last 10 messages for THIS project+user to avoid bloating the context window
+        List<ChatMessage> recentList = chatMessageRepository.findTop10ByChatSessionOrderByIdDesc(chatSession);
+        List<ChatMessage> chronological = new ArrayList<>(recentList);
+        Collections.reverse(chronological);
+
+        List<Message> history = chronological.stream()
+                .map(m -> {
+                    if (m.getRole() == MessageRole.USER) {
+                        if (m.getImageUrl() != null && !m.getImageUrl().trim().isEmpty()) {
+                            try {
+                                String url = m.getImageUrl();
+                                String fileName = url.substring(url.lastIndexOf("/") + 1);
+                                byte[] imgBytes = workspaceClient.getChatAttachment(projectId, fileName);
+                                String mimeType = java.net.URLConnection.guessContentTypeFromName(fileName);
+                                if (mimeType == null) {
+                                    mimeType = "image/png";
+                                }
+                                 return (Message) UserMessage.builder()
+                                         .text(m.getContent())
+                                         .media(new Media(
+                                                 MimeTypeUtils.parseMimeType(mimeType),
+                                                 new ByteArrayResource(imgBytes)
+                                         ))
+                                         .build();
+                            } catch (Exception e) {
+                                log.error("Failed to load attachment for history message {}", m.getId(), e);
+                                return (Message) new UserMessage(m.getContent());
+                            }
+                        } else {
+                            return (Message) new UserMessage(m.getContent());
+                        }
+                    } else {
+                        return (Message) new AssistantMessage(m.getContent() == null ? "" : m.getContent());
+                    }
+                })
+                .toList();
+
+        // Inject existing conversational summary if it exists into the system prompt context
+        String systemPrompt = PromptUtils.CODE_GENERATION_SYSTEM_PROMPT;
+        if (chatSession.getSummary() != null && !chatSession.getSummary().trim().isEmpty()) {
+            systemPrompt += "\n\nHere is a summary of the older conversation history:\n" + chatSession.getSummary();
+        }
 
         Map<String,Object> advisorParams=Map.of(
                 "userId",userId,
@@ -73,15 +145,28 @@ public class AiGenerationServiceImpl implements AiGenerationService {
         );
 
         StringBuilder fullResponseBuffer=new StringBuilder();
-        CodeGenerationTools codeGenerationTools=new CodeGenerationTools(projectId,workspaceClient);
+        CodeGenerationTools codeGenerationTools=new CodeGenerationTools(projectId,workspaceClient,vectorStore);
 
         AtomicReference<Long>  startTime=new AtomicReference<>(System.currentTimeMillis());
         AtomicReference<Long>  endTime=new AtomicReference<>(0L);
         AtomicReference<Usage> usageRef = new AtomicReference<>();
 
         return chatClient.prompt()
-                .system(PromptUtils.CODE_GENERATION_SYSTEM_PROMPT)
-                .user(userMessage)
+                .system(systemPrompt)
+                .messages(history)
+                .user(u -> {
+                    u.text(effectiveUserMessage);
+                    if (image != null && !image.isEmpty()) {
+                        try {
+                            u.media(
+                                    MimeTypeUtils.parseMimeType(image.getContentType()),
+                                    new ByteArrayResource(image.getBytes())
+                            );
+                        } catch (Exception e) {
+                            throw new RuntimeException("Failed to read image bytes", e);
+                        }
+                    }
+                })
                 .tools(codeGenerationTools)
                 .advisors(advisorSpec -> {
                     advisorSpec.params(advisorParams);
@@ -92,23 +177,25 @@ public class AiGenerationServiceImpl implements AiGenerationService {
                 .chatResponse()
                 .doOnNext(response ->{
 
-                    String content=response.getResult().getOutput().getText();
-                    if(content!=null && !content.isEmpty() && endTime.get()==0){
-                        endTime.set(System.currentTimeMillis());
+                    if (response.getResults() != null && !response.getResults().isEmpty()) {
+                        String content = response.getResult().getOutput().getText();
+
+                        if(content != null && !content.isEmpty() && endTime.get() == 0) { // first non-empty chunk received
+                            endTime.set(System.currentTimeMillis());
+                        }
+                        if(response.getMetadata().getUsage() != null) {
+                            usageRef.set(response.getMetadata().getUsage());
+                        }
+                        fullResponseBuffer.append(content);
                     }
-                    if(response.getMetadata().getUsage() != null) {
-                        usageRef.set(response.getMetadata().getUsage());
-                    }
-                    fullResponseBuffer.append(content);
 
                 })
                 .doOnComplete(()-> {
                     Schedulers.boundedElastic().schedule(()-> {
                         SecurityContextHolder.setContext(securityContext); // restore
                         try {
-//                            parseAndSaveFiles(fullResponseBuffer.toString(), projectId);
                             Long duration=(endTime.get()-startTime.get())/1000;
-                            finalizeChats(userMessage,chatSession, fullResponseBuffer.toString(),projectId,duration,usageRef.get(),userId);
+                            finalizeChats(effectiveUserMessage, finalImageUrl, chatSession, fullResponseBuffer.toString(), projectId, duration, usageRef.get(), userId);
                         } finally {
                             SecurityContextHolder.clearContext();
                         }
@@ -117,12 +204,15 @@ public class AiGenerationServiceImpl implements AiGenerationService {
                 })
                 .doOnError(error -> log.error("Error during streaming for project id: {}",projectId))
                 .map(response -> {
-                        String text=response.getResult().getOutput().getText();
-                        return new StreamResponse(text!=null ? text:"");
+                    if (response.getResults() != null && !response.getResults().isEmpty()) {
+                        String text = response.getResult().getOutput().getText();
+                        return new StreamResponse(text != null ? text : "");
+                    }
+                    return new StreamResponse("");
                 });
     }
 
-    private void finalizeChats(String userMessage, ChatSession chatSession,String fullText, Long projectId, Long duration, Usage usage, Long userId){
+    private void finalizeChats(String userMessage, String imageUrl, ChatSession chatSession, String fullText, Long projectId, Long duration, Usage usage, Long userId){
         if(usage != null) {
             int totalTokens = usage.getTotalTokens();
             usageService.recordTokenUsage(chatSession.getId().getUserId(), totalTokens);
@@ -133,7 +223,8 @@ public class AiGenerationServiceImpl implements AiGenerationService {
                         .chatSession(chatSession)
                         .role(MessageRole.USER)
                         .content(userMessage)
-                        .tokensUsed(usage.getPromptTokens())
+                        .imageUrl(imageUrl)
+                        .tokensUsed(usage!=null?usage.getPromptTokens():0)
                 .build()
         );
 
@@ -142,7 +233,7 @@ public class AiGenerationServiceImpl implements AiGenerationService {
                 .chatSession(chatSession)
                 .role(MessageRole.ASSISTANT)
                 .content(fullText)
-                .tokensUsed(usage.getCompletionTokens())
+                .tokensUsed(usage!=null?usage.getCompletionTokens():0)
                 .build();
         assistantChatMessage=chatMessageRepository.save(assistantChatMessage);
 
@@ -173,7 +264,64 @@ public class AiGenerationServiceImpl implements AiGenerationService {
                 });
 
         chatEventRepository.saveAll(chatEventList);
+
+        // Perform incremental summarization if the chat session grows beyond the 10-message rolling window
+        try {
+            ChatSession managedSession = chatSessionRepository.findById(chatSession.getId()).orElse(chatSession);
+            List<ChatMessage> recentList = chatMessageRepository.findTop10ByChatSessionOrderByIdDesc(managedSession);
+            
+            if (recentList.size() == 10) {
+                Long boundaryId = recentList.get(9).getId();
+                List<ChatMessage> toSummarize = chatMessageRepository.findOlderMessagesToSummarize(
+                        managedSession, 
+                        boundaryId, 
+                        managedSession.getLastSummarizedMessageId()
+                );
+
+                if (toSummarize != null && !toSummarize.isEmpty()) {
+                    log.info("Summarizing {} older messages pushed out of the rolling window for session {}", toSummarize.size(), managedSession.getId());
+                    StringBuilder conversationContext = new StringBuilder();
+                    for (ChatMessage msg : toSummarize) {
+                        conversationContext.append(msg.getRole().name()).append(": ").append(msg.getContent()).append("\n");
+                    }
+
+                    String currentSummary = managedSession.getSummary() != null ? managedSession.getSummary() : "None";
+                    String summarizationPrompt = "You are a conversational summary assistant. " +
+                            "Your task is to update the existing summary of a developer chat session with the newly provided turns. " +
+                            "Keep the summary concise, organized, and focused on the technical goals and files modified. Do not lose key context.\n\n" +
+                            "Existing Summary:\n" + currentSummary + "\n\n" +
+                            "New Turns to Add:\n" + conversationContext.toString() + "\n\n" +
+                            "Provide only the updated summary text. Do not include any intro or outro comments.";
+
+                    ChatResponse summarizationResponse = chatClient.prompt()
+                            .user(summarizationPrompt)
+                            .call()
+                            .chatResponse();
+
+                    if (summarizationResponse != null && summarizationResponse.getResult() != null) {
+                        String newSummary = summarizationResponse.getResult().getOutput().getText();
+
+                        if (newSummary != null && !newSummary.trim().isEmpty()) {
+                            managedSession.setSummary(newSummary.trim());
+                            managedSession.setLastSummarizedMessageId(toSummarize.get(toSummarize.size() - 1).getId());
+                            chatSessionRepository.save(managedSession);
+                            log.info("Successfully updated conversational summary for project: {}", projectId);
+
+                            // Record token usage for the summarization call
+                            if (summarizationResponse.getMetadata() != null && summarizationResponse.getMetadata().getUsage() != null) {
+                                int summarizationTokens = summarizationResponse.getMetadata().getUsage().getTotalTokens();
+                                usageService.recordTokenUsage(managedSession.getId().getUserId(), summarizationTokens);
+                                log.info("Recorded {} tokens for background summarization call", summarizationTokens);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.error("Failed to run incremental conversational summarization for project: {}", projectId, e);
+        }
     }
+
 
 //    private void parseAndSaveFiles(String fullResponse, Long projectId) {
 //        Matcher matcher=FILE_TAG_PATTERN.matcher(fullResponse);
