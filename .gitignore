@@ -1,42 +1,67 @@
-# IntelliJ
-.idea/
-*.iml
-
-# macOS
+### OS ###
 .DS_Store
 
-# VS Code
-.vscode/
-
-# Build
-target/
-build/
-out/
-
-# Logs
-*.log
-
-# Environment
+### Environment ###
 .env
 .env.*
-*.env
+!.env.example
 
-# Spring Boot configs
-**/src/main/resources/application.yml
-**/src/main/resources/application.yaml
-**/src/main/resources/application.properties
+### Logs ###
+*.log
 
-# Secrets
-*.pem
-*.key
-*.jks
-*.keystore
-*.p12
+### Temporary Files ###
+*.tmp
+*.bak
+*.swp
+*.swo
 
-#k8s
-k8s/
+### Java / Maven ###
+target/
+*.class
+*.jar
+*.war
+*.ear
 
-# Maven
-.mvn/wrapper/maven-wrapper.jar
+### Node.js ###
+node_modules/
+dist/
+build/
 
-Thumbs.db
+### IntelliJ ###
+.idea/
+*.iml
+*.iws
+*.ipr
+
+### VS Code ###
+.vscode/
+
+### STS ###
+.apt_generated/
+.classpath
+.factorypath
+.project
+.settings/
+.springBeans
+.sts4-cache/
+
+### NetBeans ###
+nbproject/
+nbbuild/
+nbdist/
+.nb-gradle/
+
+### Maven Wrapper ###
+!.mvn/wrapper/maven-wrapper.jar
+
+### Generated source exceptions ###
+!**/src/main/**/target/
+!**/src/test/**/target/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### Documentation ###
+HELP.md
+project_overview.md
+brain.md
+.gitignore
