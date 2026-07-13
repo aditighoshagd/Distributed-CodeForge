@@ -10,6 +10,7 @@ import com.cybernode.ai.distributed_codeforge.account_service.repository.PlanRep
 import com.cybernode.ai.distributed_codeforge.account_service.repository.SubscriptionRepository;
 import com.cybernode.ai.distributed_codeforge.account_service.repository.UserRepository;
 import com.cybernode.ai.distributed_codeforge.account_service.service.SubscriptionService;
+import com.cybernode.ai.distributed_codeforge.account_service.client.IntelligenceClient;
 import com.cybernode.ai.distributed_codeforge.common_lib.dto.PlanDto;
 import com.cybernode.ai.distributed_codeforge.common_lib.enums.SubscriptionStatus;
 import com.cybernode.ai.distributed_codeforge.common_lib.error.ResourceNotFoundException;
@@ -17,7 +18,10 @@ import com.cybernode.ai.distributed_codeforge.common_lib.security.AuthUtil;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.kafka.core.KafkaTemplate;
+import com.cybernode.ai.distributed_codeforge.common_lib.event.NotificationEvent;
 
 import java.time.Instant;
 import java.util.Optional;
@@ -33,21 +37,65 @@ public class SubscriptionServiceImpl implements SubscriptionService {
     private final PlanSubscriptionMapper planSubscriptionMapper;
     private final UserRepository userRepository;
     private final PlanRepository planRepository;
+    private final IntelligenceClient intelligenceClient;
+    private final KafkaTemplate<String, Object> kafkaTemplate;
 
-    private final Integer FREE_TIER_PROJECTS_ALLOWED=100;
+    @Value("${app.billing.mode:LOCAL}")
+    private String billingMode;
+
+
+    private final Integer FREE_TIER_PROJECTS_ALLOWED=0;
 
     @Override
     public SubscriptionResponse getCurrentSubscription() {
-        Long userId=authUtil.getCurrentUserId();
-        var currentSubscription= subscriptionRepository.findByUserIdAndStatusIn(userId, Set.of(
-                SubscriptionStatus.ACTIVE,SubscriptionStatus.PAST_DUE,
-                SubscriptionStatus.TRIALING
-        )).orElse(null);
+        Long userId = authUtil.getCurrentUserId();
+        var subscriptions = subscriptionRepository.findByUserIdAndStatusIn(userId, Set.of(
+                SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE,
+                SubscriptionStatus.TRIALING, SubscriptionStatus.DEMO_LOCKED
+        ));
+        var currentSubscription = subscriptions.isEmpty() ? null : subscriptions.stream()
+                .max((s1, s2) -> s1.getId().compareTo(s2.getId()))
+                .get();
         if (currentSubscription == null) {
-            return new SubscriptionResponse(null, "NONE", null, null);
+            return new SubscriptionResponse(null, "NONE", null, null, null);
         }
 
-        return planSubscriptionMapper.toSubscriptionResponse(currentSubscription);
+        SubscriptionResponse response = planSubscriptionMapper.toSubscriptionResponse(currentSubscription);
+        
+        Long tokensUsed = 0L;
+        try {
+            Integer used = intelligenceClient.getTokensUsedToday(userId);
+            if (used != null) {
+                tokensUsed = used.longValue();
+            }
+        } catch (Exception e) {
+            log.warn("Failed to fetch token usage from intelligence-service for user {}: {}", userId, e.getMessage());
+        }
+
+        response = new SubscriptionResponse(
+                response.plan(),
+                response.status(),
+                response.currentPeriodEnd(),
+                tokensUsed,
+                response.message()
+        );
+
+        // If the subscription is DEMO_LOCKED, return a custom warning message for the UI
+        if (currentSubscription.getStatus() == SubscriptionStatus.DEMO_LOCKED) {
+            String warningMsg = "Your payment was successfully processed using Stripe Test Mode. " +
+                    "This project is intended for learning and demonstration purposes. " +
+                    "Although the payment flow completed successfully, premium resources remain unavailable " +
+                    "because no real payment was processed.";
+            return new SubscriptionResponse(
+                    response.plan(),
+                    response.status(),
+                    response.currentPeriodEnd(),
+                    response.tokensUsedThisCycle(),
+                    warningMsg
+            );
+        }
+
+        return response;
     }
 
     @Override
@@ -74,8 +122,13 @@ public class SubscriptionServiceImpl implements SubscriptionService {
     public void updateSubscription(String gatewaySubscriptionId, SubscriptionStatus status, Instant periodStart, Instant periodEnd, Boolean cancelAtPeriodEnd, Long planId) {
         Subscription subscription=getSubscription(gatewaySubscriptionId);
         boolean hasSubscriptionUpdated=false;
-        if(status!=null && status!=subscription.getStatus()){
-            subscription.setStatus(status);
+        
+        SubscriptionStatus finalStatus = adjustStatusForDemoMode(status);
+        if(finalStatus!=null && finalStatus!=subscription.getStatus()){
+            if (finalStatus == SubscriptionStatus.ACTIVE && subscription.getStatus() != SubscriptionStatus.ACTIVE) {
+                sendNotificationEvent("SUBSCRIPTION_CREATED", subscription.getUser().getId(), "Subscription activated for plan: " + (subscription.getPlan() != null ? subscription.getPlan().getName() : "Unknown"));
+            }
+            subscription.setStatus(finalStatus);
             hasSubscriptionUpdated=true;
         }
 
@@ -110,15 +163,39 @@ public class SubscriptionServiceImpl implements SubscriptionService {
         Subscription subscription=getSubscription(gatewaySubscriptionId);
         subscription.setStatus(SubscriptionStatus.CANCELED);
         subscriptionRepository.save(subscription);
+        sendNotificationEvent("SUBSCRIPTION_CANCELLED", subscription.getUser().getId(), "Subscription cancelled");
+    }
 
+    private void sendNotificationEvent(String type, Long userId, String message) {
+        try {
+            NotificationEvent event = new NotificationEvent(type, userId, message);
+            kafkaTemplate.send("notification-events", userId != null ? userId.toString() : "global", event);
+            log.info("Successfully published Kafka notification event: {}", event);
+        } catch (Exception e) {
+            log.error("Failed to publish Kafka notification event for user: {}", userId, e);
+        }
     }
 
     @Override
     public void renewSubscriptionPeriod(String gatewaySubscriptionId, Instant periodStart, Instant periodEnd) {
 
-        Optional<Subscription> optional = subscriptionRepository.findByStripeSubscriptionId(gatewaySubscriptionId);
+        Optional<Subscription> optional = Optional.empty();
+        for (int i = 0; i < 5; i++) {
+            optional = subscriptionRepository.findByStripeSubscriptionId(gatewaySubscriptionId);
+            if (optional.isPresent()) {
+                break;
+            }
+            try {
+                log.info("Subscription {} not found in DB yet. Retry attempt {}/5 in 500ms...", gatewaySubscriptionId, i + 1);
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Retry wait interrupted", e);
+            }
+        }
+
         if (optional.isEmpty()) {
-            log.warn("Subscription {} not found in renewSubscriptionPeriod, skipping — checkout.session.completed will handle it", gatewaySubscriptionId);
+            log.warn("Subscription {} not found in renewSubscriptionPeriod after retries, skipping.", gatewaySubscriptionId);
             return;
         }
         Subscription subscription = optional.get();
@@ -127,7 +204,7 @@ public class SubscriptionServiceImpl implements SubscriptionService {
         subscription.setCurrentPeriodEnd(periodEnd);
 
         if(subscription.getStatus() == SubscriptionStatus.PAST_DUE || subscription.getStatus() == SubscriptionStatus.INCOMPLETE){
-            subscription.setStatus(SubscriptionStatus.ACTIVE);
+            subscription.setStatus(adjustStatusForDemoMode(SubscriptionStatus.ACTIVE));
         }
 
         log.info("sub={}", gatewaySubscriptionId);
@@ -163,11 +240,24 @@ public class SubscriptionServiceImpl implements SubscriptionService {
     @Override
     public PlanDto getCurrentSubscribedPlanByUser() {
         SubscriptionResponse subscriptionResponse = getCurrentSubscription();
+        if (subscriptionResponse == null || "NONE".equals(subscriptionResponse.status()) || "DEMO_LOCKED".equals(subscriptionResponse.status())) {
+            // [DEMO MODE / NO ACTIVE SUB]: Enforce Free plan limits for workspace-service and intelligence-service
+            return new PlanDto(null, "FREE", FREE_TIER_PROJECTS_ALLOWED, 5000, false, "0");
+        }
         return subscriptionResponse.plan();
     }
 
 
     /// Utility methods
+
+    private SubscriptionStatus adjustStatusForDemoMode(SubscriptionStatus status) {
+        if ("DEMO".equalsIgnoreCase(billingMode)) {
+            if (status == SubscriptionStatus.ACTIVE || status == SubscriptionStatus.TRIALING) {
+                return SubscriptionStatus.DEMO_LOCKED;
+            }
+        }
+        return status;
+    }
 
     private User getUser(Long userId){
         return userRepository.findById(userId).orElseThrow(()-> new ResourceNotFoundException("User",userId.toString()));
@@ -177,8 +267,21 @@ public class SubscriptionServiceImpl implements SubscriptionService {
         return planRepository.findById(planId).orElseThrow(()-> new ResourceNotFoundException("Plan",planId.toString()));
     }
     private Subscription getSubscription(String gatewaySubscriptionId) {
-        return subscriptionRepository.findByStripeSubscriptionId(gatewaySubscriptionId)
-                .orElseThrow(() -> new ResourceNotFoundException("Subscription", gatewaySubscriptionId));
+        Optional<Subscription> optional = Optional.empty();
+        for (int i = 0; i < 5; i++) {
+            optional = subscriptionRepository.findByStripeSubscriptionId(gatewaySubscriptionId);
+            if (optional.isPresent()) {
+                break;
+            }
+            try {
+                log.info("Subscription {} not found in DB yet (helper). Retry attempt {}/5 in 500ms...", gatewaySubscriptionId, i + 1);
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Retry wait interrupted", e);
+            }
+        }
+        return optional.orElseThrow(() -> new ResourceNotFoundException("Subscription", gatewaySubscriptionId));
     }
 
 }
