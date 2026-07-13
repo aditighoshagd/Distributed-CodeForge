@@ -1,16 +1,16 @@
 package com.cybernode.ai.distributed_codeforge.workspace_service.controller;
 
 
-import com.cybernode.ai.distributed_codeforge.workspace_service.dto.project.DeployResponse;
-import com.cybernode.ai.distributed_codeforge.workspace_service.dto.project.ProjectRequest;
-import com.cybernode.ai.distributed_codeforge.workspace_service.dto.project.ProjectResponse;
-import com.cybernode.ai.distributed_codeforge.workspace_service.dto.project.ProjectSummaryResponse;
+import com.cybernode.ai.distributed_codeforge.workspace_service.dto.project.*;
 import com.cybernode.ai.distributed_codeforge.workspace_service.service.DeploymentService;
 import com.cybernode.ai.distributed_codeforge.workspace_service.service.ProjectService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -18,6 +18,7 @@ import java.util.List;
 @RestController
 @RequestMapping("/projects")
 @RequiredArgsConstructor
+@Validated
 public class ProjectController {
 
     private final ProjectService projectService;
@@ -29,7 +30,7 @@ public class ProjectController {
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<ProjectSummaryResponse> getProjectById(@PathVariable Long id){
+    public ResponseEntity<ProjectSummaryResponse> getProjectById(@PathVariable @NotNull @Min(1) Long id){
 
         return ResponseEntity.ok(projectService.getUserProjectById(id));
     }
@@ -41,21 +42,28 @@ public class ProjectController {
     }
 
     @PatchMapping("/{id}")
-    public ResponseEntity<ProjectResponse> updateProject(@PathVariable Long id, @RequestBody @Valid ProjectRequest request){
+    public ResponseEntity<ProjectResponse> updateProject(@PathVariable @NotNull @Min(1) Long id, @RequestBody @Valid ProjectRequest request){
 
         return ResponseEntity.ok(projectService.updateProject(id,request));
     }
 
     @DeleteMapping("/{id}")
-    public ResponseEntity<Void> deleteProject(@PathVariable Long id){
+    public ResponseEntity<Void> deleteProject(@PathVariable @NotNull @Min(1) Long id){
 
         projectService.softdelete(id);
         return ResponseEntity.noContent().build();
     }
 
     @PostMapping("/{id}/deploy")
-    public ResponseEntity<DeployResponse> deployProject(@PathVariable Long id) {
-        return ResponseEntity.ok(deploymentService.deploy(id));
+    public ResponseEntity<DeployResponse> deployProject(
+            @PathVariable @NotNull @Min(1) Long id,
+            @RequestParam(value = "force", defaultValue = "false") boolean force) {
+        return ResponseEntity.ok(deploymentService.deploy(id, force));
+    }
+
+    @GetMapping("/{id}/logs")
+    public ResponseEntity<DeploymentLogsResponse> getProjectLogs(@PathVariable @NotNull @Min(1) Long id) {
+        return ResponseEntity.ok(deploymentService.getDeploymentLogs(id));
     }
 
 }

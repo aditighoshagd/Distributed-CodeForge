@@ -8,6 +8,7 @@ import com.cybernode.ai.distributed_codeforge.workspace_service.entity.ProjectFi
 import com.cybernode.ai.distributed_codeforge.workspace_service.mapper.ProjectFileMapper;
 import com.cybernode.ai.distributed_codeforge.workspace_service.repository.ProjectFileRepository;
 import com.cybernode.ai.distributed_codeforge.workspace_service.repository.ProjectRepository;
+import com.cybernode.ai.distributed_codeforge.workspace_service.client.IntelligenceClient;
 import com.cybernode.ai.distributed_codeforge.workspace_service.service.ProjectFileService;
 import io.minio.GetObjectArgs;
 import io.minio.MinioClient;
@@ -17,6 +18,12 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.http.HttpStatus;
+
+import java.util.UUID;
+
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
@@ -31,8 +38,10 @@ public class ProjectFileServiceImpl implements ProjectFileService {
 
     private final ProjectRepository projectRepository;
     private final ProjectFileRepository projectFileRepository;
-    private  final MinioClient minioClient;
+    private final MinioClient minioClient;
     private final ProjectFileMapper projectFileMapper;
+    private final IntelligenceClient intelligenceClient;
+
 
     @Value("${minio.project-bucket}")
     private String projectBucket;
@@ -99,10 +108,18 @@ public class ProjectFileServiceImpl implements ProjectFileService {
             file.setUpdatedAt(Instant.now());
             projectFileRepository.save(file);
             log.info("Saved file: {}", objectKey);
+
+            // Trigger AI embedding updates asynchronously or synchronously via internal client
+            try {
+                intelligenceClient.reindexFile(projectId, cleanPath, fileContent);
+            } catch (Exception e) {
+                log.warn("Failed to update RAG embeddings for file: {}/{}", projectId, cleanPath, e);
+            }
         } catch (Exception e) {
             log.error("Failed to save file {}/{}", projectId, cleanPath, e);
             throw new RuntimeException("File save failed", e);
         }
+
     }
 
     private String determineContentType(String path) {
@@ -113,5 +130,50 @@ public class ProjectFileServiceImpl implements ProjectFileService {
         if (path.endsWith(".css")) return "text/css";
 
         return "text/plain";
+    }
+
+    @Override
+    public String uploadAttachment(Long projectId, MultipartFile file) {
+        if (file.getSize() > 5 * 1024 * 1024) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "File is too large. Maximum size allowed is 5MB");
+        }
+        String originalFilename = file.getOriginalFilename();
+        String uuid = UUID.randomUUID().toString();
+        String fileName = uuid + "_" + (originalFilename != null ? originalFilename : "image.png");
+        String objectKey = "chat-attachments/" + projectId + "/" + fileName;
+
+        try {
+            minioClient.putObject(
+                    PutObjectArgs.builder()
+                            .bucket(projectBucket)
+                            .object(objectKey)
+                            .stream(file.getInputStream(), file.getSize(), -1)
+                            .contentType(file.getContentType())
+                            .build()
+            );
+            log.info("Successfully uploaded attachment to MinIO: {}", objectKey);
+            return fileName;
+        } catch (ResponseStatusException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("Failed to upload attachment to MinIO", e);
+            throw new RuntimeException("Failed to upload attachment", e);
+        }
+    }
+
+    @Override
+    public byte[] getAttachment(Long projectId, String fileName) {
+        String objectKey = "chat-attachments/" + projectId + "/" + fileName;
+        try (
+            InputStream is = minioClient.getObject(
+                    GetObjectArgs.builder()
+                            .bucket(projectBucket)
+                            .object(objectKey)
+                            .build())) {
+            return is.readAllBytes();
+        } catch (Exception e) {
+            log.error("Failed to read attachment from MinIO: {}", objectKey, e);
+            throw new RuntimeException("Failed to read attachment content", e);
+        }
     }
 }
