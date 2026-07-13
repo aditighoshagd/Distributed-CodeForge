@@ -15,11 +15,12 @@ public class CorsConfig {
     @Bean
     public CorsWebFilter corsWebFilter() {
         CorsConfiguration corsConfig = new CorsConfiguration();
-                corsConfig.setAllowedOrigins(Arrays.asList(
-                        "https://your-domain.com",
-                        "https://www.your-domain.com",
-                        "http://localhost:5173"
-
+        corsConfig.setAllowedOrigins(Arrays.asList(
+                "http://codeforge.arclite.site",
+                "https://codeforge.arclite.site",
+                "http://www.codeforge.arclite.site",
+                "https://www.codeforge.arclite.site",
+                "http://localhost:5173"
         ));
         corsConfig.setMaxAge(3600L);
         corsConfig.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
