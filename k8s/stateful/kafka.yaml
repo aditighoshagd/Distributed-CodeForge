@@ -1,0 +1,117 @@
+# k8s/stateful/kafka.yaml
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: codeforge-core
+spec:
+  selector:
+    matchLabels:
+      app: kafka
+  serviceName: kafka
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: kafka
+          image: confluentinc/confluent-local:7.5.0
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          ports:
+            - containerPort: 9092
+              name: plaintext
+            - containerPort: 29093
+              name: controller
+          env:
+            - name: KAFKA_HEAP_OPTS
+              # [OPTIMIZED]: Reduced JVM heap from 512M to 256M.
+              # Previously 512M was set for production throughput (many topics, high message rate).
+              # For this showcase, Kafka is used only for file-store saga events (very low volume).
+              # 256M is sufficient and saves 256Mi of real RAM on GKE Autopilot.
+              # To restore: change back to "-Xms512M -Xmx512M"
+              # value: "-Xms512M -Xmx512M"  # old: production sizing
+              value: "-Xms256M -Xmx256M"
+            - name: KAFKA_LOG4J_ROOT_LOGLEVEL
+              value: "ERROR"
+            - name: KAFKA_LOG4J_LOGGERS
+              value: "kafka=ERROR,org.apache.kafka=ERROR,state.change.logger=ERROR,kafka.controller=ERROR,kafka.coordinator=ERROR,kafka.server=ERROR,kafka.cluster=ERROR,kafka.log=ERROR"
+            - name: KAFKAREST_LOG4J_ROOT_LOGLEVEL
+              value: "ERROR"
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: "broker,controller"
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "1@kafka-0.kafka.codeforge-core.svc.cluster.local:29093"
+            - name: KAFKA_LISTENERS
+              value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:29092"
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092"
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: "PLAINTEXT"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: "0"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: CLUSTER_ID
+              value: "6PMpHYL9QkeyXRj9Nrp4KA"
+          resources:
+            requests:
+              # [OPTIMIZED]: Reduced from 250m/512Mi to 150m/384Mi.
+              # Kafka's minimum workable heap is 256M (set above). The request should exceed
+              # the heap by ~100Mi for JVM overhead. 384Mi request = 256Mi heap + ~128Mi overhead.
+              # cpu: 250m    # old: production — handles high-throughput topic partitions
+              # memory: 512Mi  # old: matched old 512M heap
+              cpu: 150m
+              memory: 384Mi
+            limits:
+              # [OPTIMIZED]: Reduced CPU limit from 1000m to 500m.
+              # Single-node showcase Kafka never needs a full vCPU. 500m allows burst for startup.
+              # cpu: 1000m  # old: production — Kafka leader election and replication bursts
+              # memory: 1Gi  # old: production — headroom for large message batches
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /var/lib/kafka/data
+  volumeClaimTemplates:
+    - metadata:
+        name: kafka-data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 10Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: codeforge-core
+spec:
+  clusterIP: None  # headless
+  selector:
+    app: kafka
+  ports:
+    - name: plaintext
+      port: 9092
+      targetPort: 9092
+    - name: controller
+      port: 29093
+      targetPort: 29093
