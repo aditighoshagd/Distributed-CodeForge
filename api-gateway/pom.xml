@@ -133,7 +133,7 @@
 				<version>3.4.4</version>
 				<configuration>
 					<to>
-						<image>docker.io/ankit5609/codeforge-${project.artifactId}:${project.version}</image>
+						<image>docker.io/aditiighosh/codeforge-${project.artifactId}:${project.version}</image>
 						<tags>
 							<tag>latest</tag>
 						</tags>

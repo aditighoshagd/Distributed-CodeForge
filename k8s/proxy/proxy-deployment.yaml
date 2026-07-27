@@ -18,7 +18,7 @@ spec:
       containers:
         - name: codeforge-me-proxy
           # [BUG FIX - 2025-06]: Using exact digest to bypass GKE's containerd tag/manifest cache
-          image: ankit5609/codeforge-me-proxy@sha256:c2f2961d031d3a3e202751dcdcee64e965a3a13b80c8a8a876af7cd4a26aa920
+          image: aditiighosh/codeforge-me-proxy:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 80

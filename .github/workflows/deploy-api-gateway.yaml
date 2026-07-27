@@ -6,10 +6,11 @@ on:
       - main
     paths:
       - 'api-gateway/**'
+      - 'common-lib/**'
 
 env:
   SERVICE_NAME: api-gateway
-  IMAGE_NAME: ankit5609/codeforge-api-gateway
+  IMAGE_NAME: aditiighosh/codeforge-api-gateway
 
 permissions:
   id-token: write
@@ -31,9 +32,16 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
+      - name: Build and Install Common Lib
+        working-directory: ./common-lib
+        run: |
+          chmod +x ./mvnw
+          ./mvnw clean install -DskipTests
+
       - name: Build and Push Docker Image with Jib
         working-directory: ./${{ env.SERVICE_NAME }}
         run: |
+          chmod +x ./mvnw
           ./mvnw compile jib:build \
             -Djib.to.image=docker.io/${{ env.IMAGE_NAME }}:${{ github.sha }} \
             -Djib.to.tags=latest \
