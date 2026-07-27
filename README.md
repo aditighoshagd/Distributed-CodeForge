@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://readme-typing-svg.demolab.com?font=Fira+Code&size=32&pause=1000&color=38BDF8&center=true&vCenter=true&width=900&lines=⚡+Distributed+CodeForge;Cloud-Native+AI+Collaborative+IDE;Kubernetes+%7C+Spring+Boot+3+%7C+React+19" alt="Typing SVG" />
+<img src="https://readme-typing-svg.demolab.com?font=Fira+Code&size=32&pause=1000&color=38BDF8&center=true&vCenter=true&width=900&lines=%E2%9A%A1+Distributed+CodeForge;Cloud-Native+AI+Collaborative+IDE;Kubernetes+%7C+Spring+Boot+3+%7C+React+19" alt="Typing SVG" />
 
 <br/>
 
