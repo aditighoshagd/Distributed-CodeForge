@@ -6,6 +6,7 @@ import org.springframework.cloud.config.server.EnableConfigServer;
 
 @SpringBootApplication
 @EnableConfigServer
+// Spring Cloud Config Server entry point
 public class ConfigServiceApplication {
 
 	public static void main(String[] args) {
